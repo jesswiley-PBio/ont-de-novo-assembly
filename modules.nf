@@ -235,6 +235,7 @@ process Length_Filtering {
 // Perfroms a De Novo assembly of the ONT reads using
 // Flye
 process Flye_Assembly {
+    maxForks 1
     input:
         // Tuple contains the sample base name
         // and the reads to be assembled.
@@ -249,6 +250,14 @@ process Flye_Assembly {
         val outDir
         // The number of threads to be used.
         val threads
+        //Flye handles reads with non-uniform genome coverage differently
+        // depending on the coverage of the provided reads. This parameter
+        // specifies the coverage is not uniform.
+        val unevencovParam
+        // The read overlap parameter supplied to Flye. If the reads from your
+        // run are shorter (average ~1-10kb or so) the default overlap of 3000kb
+        // may be too stringent and thus should be reduced by supplying this parmeter 
+        val readOverlap
         // A string containing previously generated
         // statistics to be appended to.
         val existingSummary
@@ -283,7 +292,7 @@ process Flye_Assembly {
     """
     #!/bin/bash
 
-    flye ${readParam} ${reads} --out-dir ${base}-flye --thread ${threads}
+    flye ${readParam} ${reads} --out-dir ${base}-flye --thread ${threads} ${unevencovParam} ${readOverlap}
 
     if [[ -f "${base}-flye/assembly.fasta" ]]; then
         mv ${base}-flye/assembly.fasta ./${base}-draft-assembly.fasta

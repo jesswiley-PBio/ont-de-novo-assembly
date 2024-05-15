@@ -12,11 +12,12 @@ def helpMessage() {
     USAGE: nextflow run main.nf [OPTIONS] --input INPUT_DIR --output OUTPUT_DIR --model MEDAKA_MODEL
     OPTIONS:
 
-    --input INPUT_DIR - [Required] A directory containing paired-end fastq files
+    --input INPUT_DIR - [Required] A directory containing ONT fastq files
 
     --output OUTPUT_DIR - [Required] A directory to place output files (If not existing, pipeline will create)
     
-    --model MEDAKA_MODEL - [Required] Medaka requires a 'model' which corresponds to the flow-cell type/basecaller parameters used to correct for errors typical to that technology. Use 'medaka tools list_models' to find this.
+    --model MEDAKA_MODEL - [Required] Medaka requires a 'model' which corresponds to the flow-cell type/basecaller parameters used to correct for errors typical to that technology. 
+                        Use 'medaka tools list_models' to find this.
 
     OPTIONAL:
         --trimONTAdapters - Enables ONT Adapter/Barcode trimming using Porechop [Default = off]
@@ -25,9 +26,23 @@ def helpMessage() {
 
         --maxReadLen INT - If supplied, the pipeline will perform legnth filtering using Chopper excluding reads greater than this size [Default = off] 
 
-        --medakaBatchSize INT - Medaka uses a lot of GPU memory, and if you're assembly is large enough it may cause Medaka to crash. Reducing the batch size will help solve this issue. [Default = 100]
+        --medakaBatchSize INT - Medaka uses a lot of GPU memory, and if you're assembly is large enough it may cause Medaka to crash. Reducing the batch 
+                                size will help solve this issue. [Default = 100]
 
         --preGuppy5 - Flye handles data generated version of Guppy < 5.0 differently. Supply this parameter if your data was generated pre-Guppy 5.0
+        
+        --meta - Flye option for meta-genome assembly mode. The main difference is that without this option, the "regular" mode assumes a relatively uniform 
+                coverage of the assembled genome and makes certain decisions based on that. The meta-genome mode is more general in this respect, and works 
+                well for assembly of complex microbial communities with highly non-uniform coverage and richer repeat content. It is sensitive to very short 
+                sequences and underrepresented organisms at low read coverage (as low as 3x) [Default = off].
+
+        --min-overlap INT - Flye minimum overlap between reads. The default minimum overlap length used by the assembler varies depending on the type of reads and the selected 
+                        mode. For Nanopore reads, the typical default minimum overlap length is set to 3000 base pairs. This default setting is chosen to balance the 
+                        potential for alignment errors common in longer reads and the need for sufficient overlap to confidently establish connections between reads 
+                        in the assembly process. Intuitively, we want keep it as high as possible (e.g. 5-10kb) to reduce the complexity of a repeat graph. However, if the 
+                        read length is not sufficient, this might lead to gaps in assembly. Flye automatically selects this parameter based on the read length distribution, 
+                        and for the most of datasets the selected value works well. In some rare cases, this parameter needs to be adjusted manually, for example if the read 
+                        length distribution is skewed. [Default = off, Flye chooses length base on type of reads and the selected mode].
 
         --threads INT - The number of CPU threads that can be use to run pipeline tools in parallel
 """
@@ -66,6 +81,8 @@ params.output = false
 params.threads = 1
 params.model = false
 params.preGuppy5 = false
+params.meta = false
+params.minOverlap = false
 params.medakaBatchSize = 100
 params.trimONTAdapters = false
 params.minReadLen = 0
@@ -102,7 +119,7 @@ else {
     println "Input Directory: ${inDir}"
 }
 
-// Create a channel for hte input files.
+// Create a channel for the input files.
 inputFiles_ch = Channel
     // Pull from pairs of files (illumina fastq files denoted by having R1 or R2 in
     // the file name).
@@ -164,6 +181,43 @@ if (params.preGuppy5) {
     // were generated prior to guppy v5.0, change the 
     // value of the nanoporeReadType variable to '--nano-raw.'
     nanoporeReadType = "--nano-raw"
+}
+
+// Flye assumes relatively uniform coverage of the assembled genome and makes assumptions 
+// based on that. This mode is more general in coverage and works well for the assembly of complex
+// microbial communities with highly non-uniform coverage. It is sensitive to short sequences at low
+// read coverage (as low as 3x) The user denotes this using a command line option. Thus,
+// we can handle this by containing the parameter in a string and then placing
+// it into the flye command run by nextflow.
+//
+// By default, we assume that the reads have uniform coverage.
+// Thus, we create a variable holding the flag ""
+nanoporeCoverageType = ""
+if (params.meta) {
+    // If the user supplied the parameter denoting their reads
+    // may have non-uniform coverage, and shorter reads change   
+    // the value of the nanoporeCoverageType variable to '--meta.'
+    nanoporeCoverageType = "--meta"
+}
+
+// Flye wants to maximize the read length overlap to reduce the complexity of a repeat graph (e.g., 5-10kb). 
+// However, if the read lengths are on the shorter end of the acceptable read lengh for flye, the read length 
+// is not sufficient, and might lead to gaps in assembly or the inability to assemble any contigs, despite the
+// a suffiencent number of reads. Flye automatically selects this parameter based on the read length distribution 
+// (for Nanopore reads, the typical default minimum overlap length is set to 3000 base pairs), and for the most 
+// of datasets the selected value works well. In some rare cases, this parameter needs to be adjusted manually, 
+// for example if the read length distribution is skewed, or the read lengths are short.
+// Thus, we can handle this by containing the parameter in a string and then placing
+// it into the flye command run by nextflow.
+//
+// By default, we assume that the reads can suffeciently accomodate the default pipeline setting (nanopore ~3kb overlap).
+// Thus, we create a variable holding the flag ""
+nanoporeReadOverlapParam = ""
+if (params.minOverlap) {
+    // If the user has specified a custom minimum overlap value, indicating that
+    // the read lengths are shorter and the default overlap expectation should be adjusted. 
+    // the value of the nanoporeReadOverlapParam variable to '--min-overlap *int*.'
+    nanoporeReadOverlapParam = "--min-overlap ${params.minOverlap}"
 }
 
 // Handles the --trimONTAdapters parameter. Updates
@@ -243,7 +297,7 @@ workflow {
         QC_Report_Filtered( Porechop_Trimming.out[0], outDir )
 
        // Performs De Novo Assembly of the trimmed reads using Flye
-        Flye_Assembly( Porechop_Trimming.out[0], nanoporeReadType, outDir, params.threads, Porechop_Trimming.out[2] )
+        Flye_Assembly( Porechop_Trimming.out[0], nanoporeReadType, outDir, params.threads, nanoporeCoverageType, nnanoporeReadOverlapParam, Porechop_Trimming.out[2] )
     }
     else if (params.trimONTAdapters == false && (params.minReadLen != 0 || params.maxReadLen != 0)) {
         Length_Filtering( Collect_Raw_Read_Stats.out[0], minReadLenParam, maxReadLenParam, outDir, Collect_Raw_Read_Stats.out[1] )
@@ -251,11 +305,11 @@ workflow {
         QC_Report_Filtered( Length_Filtering.out[0], outDir )
 
         // Performs De Novo Assembly of the filtered reads using Flye
-        Flye_Assembly( Length_Filtering.out[0], nanoporeReadType, outDir, params.threads, Length_Filtering.out[1] )
+        Flye_Assembly( Length_Filtering.out[0], nanoporeReadType, outDir, params.threads, nanoporeCoverageType, nanoporeReadOverlapParam, Length_Filtering.out[1] )
     }
     else {
         // Performs De Novo Assembly of the reads using Flye
-        Flye_Assembly( Collect_Raw_Read_Stats.out[0], nanoporeReadType, outDir, params.threads, Collect_Raw_Read_Stats.out[1] )
+        Flye_Assembly( Collect_Raw_Read_Stats.out[0], nanoporeReadType, outDir, params.threads, nanoporeCoverageType, nanoporeReadOverlapParam, Collect_Raw_Read_Stats.out[1] )
     }
 
     // Corrects the assembled contigs using Medaka
